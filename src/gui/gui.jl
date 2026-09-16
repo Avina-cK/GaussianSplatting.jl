@@ -2,6 +2,7 @@
 include("theme.jl")
 include("ui_state.jl")
 include("render_state.jl")
+include("worker_core.jl")
 include("worker.jl")
 include("frustums.jl")
 include("camera_path.jl")
@@ -101,9 +102,9 @@ Compact `<spinner> Rendering...` status line for the controls window.
 Always occupies exactly one line, so the widgets below do not jump when
 the worker goes busy / idle.
 """
-function worker_busy_line!(w::RenderWorker)
+function worker_busy_line!(core::WorkerCore)
     radius, thickness = 6f0, 2.5f0
-    status = busy_status(w)
+    status = busy_status(core)
     if status ≢ nothing && status.elapsed ≥ SPINNER_DELAY
         spinner!(; radius, thickness)
         CImGui.SameLine()
@@ -225,6 +226,19 @@ mutable struct GSGUI
 
     worker::RenderWorker
 end
+
+function prepare_worker!(gui::GSGUI)
+    # Scene arrays may have been created on this task's stream: retire that
+    # work before the worker task, on its own stream, touches them.
+    KA.synchronize(get_backend(gui.rasterizer))
+    refresh_memory!(gui, gui.worker)
+end
+worker_step!(gui::GSGUI) = train_step!(gui, gui.worker)
+render_enabled(gui::GSGUI) = gui.worker.render[]
+render_view!(gui::GSGUI, snap::ViewSnapshot, version::UInt64) =
+    render_scene_view!(gui, gui.worker, snap, version)
+handle_command!(gui::GSGUI, cmd::Tuple) = handle_scene_command!(gui, gui.worker, cmd)
+command_activity(::GSGUI, tag::Symbol) = scene_command_activity(tag)
 
 const GSGUI_REF::Ref{GSGUI} = Ref{GSGUI}()
 
@@ -431,7 +445,7 @@ function apply_dataset!(gui::GSGUI, loaded)
     gui.ui_state.strategy_name = strategy_name(loaded.trainer.strategy)
     sync_worker_flags!(gui)
 
-    submit!(gui.worker, (:install_scene, loaded))
+    submit!(gui.worker.core, (:install_scene, loaded))
     gui.render_state.need_render = true
     return
 end
@@ -492,7 +506,7 @@ function apply_model!(gui::GSGUI, loaded)
     gui.ui_state.strategy_name = ""
     sync_worker_flags!(gui)
 
-    submit!(gui.worker, (:install_model, loaded.gaussians))
+    submit!(gui.worker.core, (:install_model, loaded.gaussians))
     gui.render_state.need_render = true
     return
 end
@@ -532,7 +546,7 @@ function close_scene!(gui::GSGUI)
     gui.ui_state.strategy_name = ""
     sync_worker_flags!(gui)
 
-    submit!(gui.worker, (:close_scene,))
+    submit!(gui.worker.core, (:close_scene,))
     gui.render_state.need_render = true
     return
 end
@@ -564,7 +578,7 @@ function export_ply_dialog!(gui::GSGUI)
     isempty(ply_file) && return
     endswith(ply_file, ".ply") || (ply_file *= ".ply")
     # Reads GPU arrays: run on the worker so it is ordered with training steps.
-    submit!(gui.worker, (:export_ply, ply_file))
+    submit!(gui.worker.core, (:export_ply, ply_file))
     return
 end
 
@@ -626,7 +640,7 @@ function menu_bar!(gui::GSGUI)
                 endswith(state_file, ".safetensors") ||
                     (state_file *= ".safetensors")
                 # Saving reads GPU arrays: run on the worker so it is ordered with training steps.
-                submit!(gui.worker, (:save_state, state_file))
+                submit!(gui.worker.core, (:save_state, state_file))
             end
         end
 
@@ -966,7 +980,7 @@ function open_dataset_modal!(gui::GSGUI)
 end
 
 function launch!(gui::GSGUI)
-    start_worker!(gui)
+    start_worker!(gui.worker.core, gui)
     # ImPlot draws the loss curves (see `loss_plot!`). It keeps a context of
     # its own, bound to the ImGui one `NGL.Context` created; only the render
     # loop below draws through it, so its lifetime is this call's.
@@ -979,7 +993,7 @@ function launch!(gui::GSGUI)
         end
     finally
         ImPlot.DestroyContext(implot_ctx)
-        stop_worker!(gui.worker)
+        stop_worker!(gui.worker.core)
         close_video!(gui.capture_mode)
     end
 end
@@ -996,7 +1010,7 @@ function loop!(gui::GSGUI)
     # Worker results: stats, errors, orbit-target picks.
     gui.ui_state.loss = w.loss[]
     gui.ui_state.loss_ema = w.loss_ema[]
-    err = take_error!(w)
+    err = take_error!(w.core)
     if err ≢ nothing
         gui.ui_state.worker_error = err
         # The frame a capture waits for may be the one that failed:
@@ -1097,7 +1111,7 @@ function scene_window!(extra_draws::Function, gui::GSGUI, dockspace_id; allow_re
         end
     end
 
-    upload_frame!(gui)
+    upload_frame!(gui.worker.core, gui.render_state.surface; resolution(gui.camera)...)
 
     if visible
         draw_scene!(extra_draws, gui)
@@ -1121,7 +1135,7 @@ function scene_window!(extra_draws::Function, gui::GSGUI, dockspace_id; allow_re
 
             rect_min = CImGui.GetItemRectMin()
             mouse_pos = CImGui.GetMousePos()
-            submit!(gui.worker, (:pick_orbit,
+            submit!(gui.worker.core, (:pick_orbit,
                 floor(Int, mouse_pos.x - rect_min.x) + 1,
                 floor(Int, mouse_pos.y - rect_min.y) + 1))
         end
@@ -1143,7 +1157,7 @@ showing its last frame), so without this the app looks frozen for the
 badge is drawn into the current window's draw list, in its corner.
 """
 function worker_busy_overlay!(gui::GSGUI, rect_min)
-    status = busy_status(gui.worker)
+    status = busy_status(gui.worker.core)
     status ≡ nothing && return
     (; activity, elapsed) = status
     elapsed < SPINNER_DELAY && return
@@ -1275,7 +1289,7 @@ function handle_ui!(gui::GSGUI; frame_time)
             "around, so the process always holds at least this much.")
         stat_row!("Number of Gaussians", string(w.n_gaussians[]))
         CImGui.EndTable()
-        worker_busy_line!(w)
+        worker_busy_line!(w.core)
 
         isempty(gui.ui_state.worker_error) || CImGui.TextColored(
             (1f0, 0.3f0, 0.3f0, 1f0), gui.ui_state.worker_error)
@@ -1311,7 +1325,7 @@ function scene_tab!(gui::GSGUI)
     if CImGui.Button("Render", CImGui.ImVec2(-1, 0))
         gui.ui_state.render[] = !rendering
         w.render[] = gui.ui_state.render[]
-        notify(w.wakeup)
+        wake!(w.core)
     end
     rendering ? accent_button_end() : red_button_end()
     CImGui.SetItemTooltip(

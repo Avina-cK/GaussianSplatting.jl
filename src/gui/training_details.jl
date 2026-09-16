@@ -192,7 +192,7 @@ function training_controls!(gui)
         GC.gc(true)
         ui_state.train[] = !ui_state.train[]
         w.train[] = ui_state.train[]
-        notify(w.wakeup)
+        wake!(w.core)
     end
     accent_button_end()
     training_steps_left || CImGui.SetItemTooltip("Step limit reached: raise `Max Steps` to train further.")
@@ -212,7 +212,7 @@ function training_controls!(gui)
         ui_state.max_steps[] = max(Int32(0), ui_state.max_steps[])
         w.max_steps[] = Int(ui_state.max_steps[])
         # Raising the limit past the current step lets training resume.
-        notify(w.wakeup)
+        wake!(w.core)
     end
     CImGui.SetItemTooltip("Training stops itself once it has taken this many steps. 0 means no limit.")
 

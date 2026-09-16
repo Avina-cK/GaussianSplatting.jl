@@ -128,7 +128,7 @@ Called every UI frame while a capture is in progress.
 function poll_capture!(c::CaptureMode, gui)
     c.is_rendering || return
 
-    frame = fetch_frame(gui.worker, c.pending_version;
+    frame = fetch_frame(gui.worker.core, c.pending_version;
         width=c.width, height=c.height)
     frame ≡ nothing && return # Worker has not caught up yet.
 
