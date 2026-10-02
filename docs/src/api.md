@@ -34,17 +34,24 @@ Additionally, if setting `scale > 1`, following directories should exist:
 
 ## Loading a RealityCapture dataset
 
-Scenes aligned in RealityCapture / RealityScan are exported in a different
-shape, and have to be converted first:
+Scenes aligned in RealityCapture/ RealityScan are exported in a different
+shape, and have to be converted first. 
+The RealityCapture/ RealityScan export folder should contain:
 
 ```
-- input/             the images, as exported
+- input/             the images, exported with the consistent size
+- bundler.out        the Bundler v0.3 export (either axis option)
+- images.txt         the image list (list.txt also accepted)
 - camera-params.csv  the camera parameters, as exported
-- points.ply         the point cloud, exported with XYZ & RGB
+- points.ply         the point cloud, (i.e., a coloured mesh) exported with XYZ & RGB
 ```
-
+The above can be called directly in bash by:
 ```bash
-julia --project scripts/rc-convert.jl -s <path-to-rc-export> --resize
+julia --project scripts/rc-convert.jl -s <path-to-rc-export> [-o OUTPUT_PATH] --resize
+```
+or in the julia REPL (with the GaussianSplatting.jl package loaded):
+```julia
+GaussianSplatting.rc_convert(<path-to-rc-export>; output_dir=<path-to-colmap-output>, resize=resize, max_points=max_points, ...)
 ```
 
 This writes `images/` (plus `images_2`, `images_4`, `images_8` with `--resize`)
